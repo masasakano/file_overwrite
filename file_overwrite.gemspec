@@ -40,5 +40,6 @@ Gem::Specification.new do |s|
   s.test_files.reject! { |fn| File.symlink? fn }
   # s.requirements << 'libmagick, v6.0' # Simply, info to users.
   # s.rubygems_version = %q{1.3.5}      # This is always set automatically!!
+  s.metadata["yard.run"] = "yri" # use "yard" to build full HTML docs.
 end
 
