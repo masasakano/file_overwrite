@@ -1,0 +1,27 @@
+*.[oa]
+*.so
+*.dylib
+*~
+*.nogem
+*nogem.*
+*.bak
+*.org
+*.orig
+*.gem
+*.pyc
+*.yardoc
+/doc/*
+
+# Ignore bundler config.
+/.bundle
+
+# Ignore all logfiles and tempfiles.
+/log/*
+/tmp/*
+!/log/.keep
+!/tmp/.keep
+
+/node_modules
+/yarn-error.log
+
+.byebug_history
