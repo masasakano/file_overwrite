@@ -1,4 +1,8 @@
 -----
+2018-10-12  Masa Sakano
+
+ * mv lib/file_overwrite/file_overwrite.rb lib/file_overwrite.rb
+-----
 (Version: 0.1)
 2018-09-19  Masa Sakano
 
