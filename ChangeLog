@@ -1,4 +1,15 @@
 -----
+(Version: 1.0)
+2018-10-13  Masa Sakano
+  * Major upgrade. sub and gsub now accept local-scope variables like $1.
+  
+  * A bug in dump is fixed.
+  * Added alias save, the methods path and `last_match`, class methods modify! (open!), read, `each_line`.
+  * Added `.github/README.md`
+  * Major update in README
+  * Tests added accordingly.
+
+-----
 2018-10-12  Masa Sakano
 
  * mv lib/file_overwrite/file_overwrite.rb lib/file_overwrite.rb

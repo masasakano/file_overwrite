@@ -18,5 +18,5 @@ test:
 	rake test
 
 doc:
-	yard doc
+	yard doc; ruby -r rdoc -e 'puts RDoc::Markup::ToMarkdown.new.convert File.read("README.en.rdoc")' > .github/README.md; ls -lF doc/file.README.en.html .github/README.md
 

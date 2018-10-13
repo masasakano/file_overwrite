@@ -105,14 +105,26 @@ class FileOverwrite
   #   @return [Encoding]
   attr_accessor :int_enc
 
+  # last_match from {#sub} ({#sub!}) and {#gsub}
+  #
+  # This values is false when uninitialised.
+  # To set this value is for user's convenience only, and
+  # has no effect on processing or any of the methods.
+  # Every time a user runs {#sub} or {#gsub}, this value is reset.
+  #
+  # @!attribute [rw] last_match
+  #   @return [MatchData]
+  attr_accessor :last_match
+
   # @param fname [String] Input filename
   # @param backup: [String, NilClass] File name to which the original file is backed up.  If non-Nil, suffix is ignored.
   # @param suffix: [String, TrueClass, FalseClass, NilClass] Suffix of the backup file.  True for Def, or false if no backup.
   # @param noop: [Boolean] no-operationor dryrun
   # @param verbose: [Boolean, NilClass] the same as $VERBOSE or the command-line option -W, i.e., the verbosity is (true > false > nil).  Forced to be true if $DEBUG
   # @param clobber: [Boolean] raise Exception if false(Def) and fname exists and suffix is non-null.
-  # @param touch: [Boolean] if true (non-Def), when the file content does not change, the timestamp is updated, unless aboslutely no action is taken for the file.
-  def initialize(fname, backup: nil, suffix: true, noop: false, verbose: $VERBOSE, clobber: false, touch: false)
+  # @param touch: [Boolean] if true (non-Def), even when the file content does not change, the timestamp is updated, as long as the file is attempted to be save (#{run!} or #{save})
+  # @param last_match: [MatchData, NilClass, FalseClass] To pass Regexp.last_match in Caller's scope.
+  def initialize(fname, backup: nil, suffix: true, noop: false, verbose: $VERBOSE, clobber: false, touch: false, last_match: false)
     @fname = fname
     @backup = backup
     @suffix = (backup ? true : suffix)
@@ -120,6 +132,7 @@ class FileOverwrite
     @verbose = $DEBUG || verbose
     @clobber = clobber
     @touch   = touch
+    @last_match = last_match
 
     @ext_enc_old = nil
     @ext_enc_new = nil
@@ -144,7 +157,7 @@ class FileOverwrite
   # (so you can tell what the backup filename would be if the suffix was set).
   #
   # @param suffix [String, TrueClass, FalseClass, NilClass] Suffix of the backup file.  True for Def, or false if no backup.
-  # @param backupfile: [String, NilClass] Explicilty specify the backup filename.
+  # @param backupfile: [String, NilClass] Explicilty specify the backup filename, when suffix is nil. (For internal use)
   # @return [String, NilClass]
   def backup(suffix=nil, backupfile: nil)
     return backup_from_suffix(suffix)  if suffix   # non-nil suffix explicitly given
@@ -187,7 +200,7 @@ class FileOverwrite
   def dump
     return @outstr.dup   if @outstr
     return join_outary() if @outary
-    return File.read(@iotmp.path) if @is_edit_finished
+    return File.read(@iotmp.path) if @is_edit_finished && !completed?
     File.read(@fname)
   end
 
@@ -266,6 +279,16 @@ class FileOverwrite
   alias_method :reset?, :fresh? if ! self.method_defined?(:reset?)
 
 
+  # Returns the (duplicate of the) filename to be (or to have been) updated.
+  #
+  # To destructively modify this value would affect nothing in the parent object.
+  #
+  # @return [String]
+  def path
+    @fname.dup
+  end
+
+
   # Returns true if the instance is ready to run (to execute overwriting the file).
   def ready?
     !fresh? && !completed?
@@ -314,7 +337,7 @@ class FileOverwrite
 
   # String#valid_encoding?()
   #
-  # returns nil if the process has been already completed.
+  # @note returns nil if the process has been already completed.
   #
   # @return [Boolean, NilClass]
   def valid_encoding?()
@@ -422,7 +445,9 @@ class FileOverwrite
 
     return self
   end
-  alias_method :run, :run! if ! self.method_defined?(:run)
+  alias_method :run,   :run! if ! self.method_defined?(:run)
+  alias_method :save,  :run! if ! self.method_defined?(:save)
+  alias_method :save!, :run! if ! self.method_defined?(:save!)
 
 
   ########################################################
@@ -459,13 +484,18 @@ class FileOverwrite
     raise ArgumentError, 'Block must be given.' if !block_given?
     normalize_status(:@is_edit_finished)
 
-    kwd_def = {}
-    kwd_def[:ext_enc] = @ext_enc_old if @ext_enc_old
-    kwd_def[:int_enc] = @int_enc     if @int_enc
-    kwd = kwd_def.merge kwd
+    kwd_open = {}
+    kwd_open[:external_encoding] = @ext_enc_old if @ext_enc_old
+    kwd_open[:internal_encoding] = @int_enc     if @int_enc
+    kwd_open[:external_encoding] = (kwd[:ext_enc] || kwd_open[:external_encoding])
+    kwd_open[:internal_encoding] = (kwd[:int_enc] || kwd_open[:internal_encoding])
+    [:mode, :flags, :encoding, :textmode, :binmode, :autoclose].each do |es|
+      # Method list from https://ruby-doc.org/core-2.5.1/IO.html#method-c-new
+      kwd_open[es] = kwd[es] if kwd.key?(es)
+    end
 
     begin
-      File.open(@fname, **kwd) { |ioin|
+      File.open(@fname, **kwd_open) { |ioin|
         @iotmp = tempfile_io
         yield(ioin, @iotmp)
       }
@@ -577,14 +607,15 @@ class FileOverwrite
 
   # Handler to process the entire string of the file (or current content)
   #
-  # If block is not given, just sets the state as String
+  # If block is not given, just sets the processing-state as String.
   #
-  # Else, File.read(infile) is given to the block.
-  # Then, the returned value is held as a String, hence this method can be chained.
+  # Else, IO.read(infile) is given to the block.  No other options, such as length,
+  # as in IO.read are accepted.  Then, the returned value is held as a String,
+  # while self is returned; hence this method can be chained.
   # If the block returns nil (or Boolean), {FileOverwriteError} is raised.
-  # Make sure to return a String (whether an empty string or "true")
+  # Make sure for the block to return a String.
   #
-  # Note this method does not take arguments as in IO.read
+  # Note this method does not take arguments as in IO.read .
   #
   # @param **kwd [Hash] ext_enc, int_enc
   # @return [self]
@@ -599,7 +630,8 @@ class FileOverwrite
     end
       
     @outstr = yield(@outstr) if block_given?
-    raise FileOverwriteError, 'ERROR: The returned value from the block in read() can not be nil or Boolean.' if !@outstr || true == @outstr
+    raise FileOverwriteError, 'ERROR: The returned value from the block in read() has to be String.' if !defined?(@outstr.gsub)
+    warn "WARNING: Empty string returned from a block in #{__method__}" if !@verbose.nil? && @outstr.empty?
     self
   end
 
@@ -614,7 +646,7 @@ class FileOverwrite
   end
 
 
-  # Similar to {String#replace} but the original is not modified
+  # Replaces the file content with the given argument like {String#replace}
   #
   # This method can be chained.
   #
@@ -641,18 +673,22 @@ class FileOverwrite
   # This method can be chained.
   # This method never returns an Enumerator.
   #
-  # WARNING: Do not use the local variables like $1, $2, $', and Regexp.last_match
-  # inside the block supplied.  They would NOT be interpreted in the context of
-  # this method, but that in the caller, which is most likely not to be what you want.
-  #
-  # Instead, this method supplies the MatchData of the match as the second block parameter 
-  # in addition to the matched string as in String#sub.
+  # @note Algorithm
+  #   To realise the local-scope variables like $~, $1, and Regexp.last_match to
+  #   be usable inside the block as in String#sub, it overwrites them when a block
+  #   is given (See the linked article for the phylosophy of how to do it).
+  #   Once a block is read, those variables remain as updated values even after the block
+  #   in the caller's scope, in the same way as String#sub.  However, when a block is not given,
+  #   those variables are *NOT* updated, which is different from String#sub.
+  #   You can retrieve the MatchData by this method via {#last_match} after {#sub}
+  #   is called, if need be.
   #
   # @param *rest [Array<Regexp,String>]
   # @param max: [Integer] the number of the maximum matches.  If it is not 1, {#gsub} is called, instead.  See {#gsub} for detail.
   # @param **kwd [Hash] ext_enc, int_enc
   # @return [self]
   # @yield the same as String#sub
+  # @see https://stackoverflow.com/questions/52359278/how-to-pass-regexp-last-match-to-a-block-in-ruby/52385870#52385870
   def sub(*rest, max: 1, **kwd, &bloc)
     return self if sub_gsub_args_only(*rest, max: max, **kwd)
 
@@ -664,16 +700,20 @@ class FileOverwrite
       return gsub(*rest, max: max, **kwd, &bloc)
     end
 
-    begin
-      m = rest[0].match(@outstr)
-      # Returning nil, Integer etc is accepted in the block of sub/gsub
-      @outstr = m.pre_match + yield(m[0], m).to_s + m.post_match if m
-      # Not to break the specification of sub(), but just to extend.
-      return self
-    rescue NoMethodError => err
-      warn_for_sub_gsub(err)
-      raise
+    @last_match = rest[0].match(@outstr)
+    return self if !@last_match
+
+    # Sets $~ (Regexp.last_match) in the given block.
+    # @see https://stackoverflow.com/questions/52359278/how-to-pass-regexp-last-match-to-a-block-in-ruby/52385870#52385870
+    bloc.binding.tap do |b|
+      b.local_variable_set(:_, $~)
+      b.eval("$~=_")
     end
+
+    # The first (and only) argument for the block is $& .
+    # Returning nil, Integer etc is accepted in the block of sub/gsub
+    @outstr = @last_match.pre_match + yield(@last_match[0]).to_s + @last_match.post_match
+    return self
   end
 
 
@@ -693,26 +733,33 @@ class FileOverwrite
   # This method can be chained.
   # This method never returns an Enumerator.
   #
-  # This method supplies the MatchData of the match as the second block parameter 
-  # in addition to the matched string as in String#sub.
-  #
   # Being different from the standard Srrint#gsub, this method accepts
   # the optional parameter max, which specifies the maximum number of times
   # of the matches and is valid ONLY WHEN a block is given.
+  #
+  # @note Algorithm
+  #   See {#sub} for the basic algorithm.
+  #   This method emulates String#gsub as much as possible (duck-typing).
+  #   In String#gsub, the variable $~ after the method has the last matched characters
+  #   as the matched string and the original string before the last matched characters
+  #   as pre_match.  For example,
+  #     'abc'.gsub(/./){$1.upcase}
+  #   returns
+  #     'ABC'
+  #   and leaves
+  #     $& == 'c'
+  #     Regexp.pre_match == 'ab'
+  #   It is the same in this method.
   #
   # @note Disclaimer
   #   When a block is not given but arguments only (and not expecting Enumerator to return),
   #   this method simply calls String#gsub .  However, when only 1 argument
   #   and a block is given, this method must iterate on its own, which is implemented.
   #   I am not 100% confident if this method works in the completely same way
-  #   as String#gsub in every single situation (except the local variables like $1, $2, etc
-  #   are not on the {#gsub} context; see {#sub}), given the regular expression
-  #   has so many possibilities; I have made the best effort and so far
-  #   I have not found any cases where this method breaks.
+  #   as String#gsub in every single situation, given the regular expression
+  #   has so many possibilities; so far I have not found any cases where this method breaks.
   #   This method is more inefficient and slower than the original String#gsub
-  #   as this method scans/matches the string twice as many times as String#gsub
-  #   (which is unavoidable to implement it properly, I think), and the implementation
-  #   is in pure Ruby.
+  #   as the iteration is implemented in pure Ruby.
   #
   # @param *rest [Array<Regexp,String>]
   # @param max: [Integer] the number of the maximum matches.  0 means no limit (as in String#gsub).  Valid only if a block is given.
@@ -720,6 +767,7 @@ class FileOverwrite
   # @return [self]
   # @yield the same as String#gsub
   # @see #sub
+  # @see https://stackoverflow.com/questions/52359278/how-to-pass-regexp-last-match-to-a-block-in-ruby/52385870#52385870
   def gsub(*rest, max: 0, **kwd, &bloc)
     return sub(*rest, max: 1, **kwd, &bloc) if 1 == max  # Note: Error message would be labelled as 'sub'
     return self if sub_gsub_args_only(*rest, max: max, **kwd)
@@ -730,39 +778,45 @@ class FileOverwrite
 
     max = 5.0/0 if max.to_i <= 0
 
-    scans = @outstr.scan(rest[0])
+    regbase_str = rest[0].to_s
+    regex = Regexp.new( sprintf('(%s)', regbase_str) ) # to guarantee the entire string is picked up by String#scan
+    scans = @outstr.scan(regex)
     return self if scans.empty?  # no matches
 
     scans.map!{|i| [i].flatten}  # Originally, it can be a double array.
-    regbase_str = rest[0].to_s
     prematch = ''
     ret = ''
     imatch = 0  # Number of matches
-    begin
-      scans.each do |ea_sc|
-        str_matched = ea_sc[0]
-        imatch += 1
-        pre_size = prematch.size
-        pos_end_p1 = @outstr.index(str_matched, pre_size) # End+1
-        str_between = @outstr[pre_size...pos_end_p1]
-        prematch << str_between
-        ret      << str_between
-        regex = Regexp.new( sprintf('(?<=\A%s)%s', Regexp.quote(prematch), regbase_str) )
-        #regex = rest[0] if prematch.empty?  # The first run
-        m = regex.match(@outstr)
-        prematch << str_matched
-        # Not to break the specification of sub(), but just to extend.
-        ret << yield(m[0], m).to_s
-        break if imatch >= max
-      end
-      ret << Regexp.last_match.post_match  # Guaranteed to be non-nil.
+    scans.each do |ea_sc|
+      str_matched = ea_sc[0]
+      imatch += 1
+      pre_size = prematch.size
+      pos_end_p1 = @outstr.index(str_matched, pre_size) # End+1
+      str_between = @outstr[pre_size...pos_end_p1]
+      prematch << str_between
+      ret      << str_between
+      regex = Regexp.new( sprintf('(?<=\A%s)%s', Regexp.quote(prematch), regbase_str) )
+      #regex = rest[0] if prematch.empty?  # The first run
+      @last_match = regex.match(@outstr)
+      prematch << str_matched
 
-      @outstr = ret
-      return self
-    rescue NoMethodError => err
-      warn_for_sub_gsub(err)
-      raise
+      # Sets $~ (Regexp.last_match) in the given block.
+      # @see https://stackoverflow.com/questions/52359278/how-to-pass-regexp-last-match-to-a-block-in-ruby/52385870#52385870
+      bloc.binding.tap do |b|
+        b.local_variable_set(:_, $~)
+        b.eval("$~=_")
+      end
+
+      # The first (and only) argument for the block is $& .
+      # Returning nil, Integer etc is accepted in the block of sub/gsub
+      ret << yield(@last_match[0]).to_s
+
+      break if imatch >= max
     end
+    ret << Regexp.last_match.post_match  # Guaranteed to be non-nil.
+
+    @outstr = ret
+    return self
   end
 
 
@@ -820,6 +874,16 @@ class FileOverwrite
   # Class methods
   ########################################################
 
+  # Class method for {FileOverwrite#initialize}.{#modify!}
+  #
+  # @see #initialize
+  # @see #modify
+  def self.modify!(*rest, **kwd, &bloc)
+    new(*rest, **kwd).modify!(**kwd, &bloc)
+  end
+  singleton_class.send(:alias_method, :open!, :modify!)
+
+
   # Shorthand of {FileOverwrite#initialize}.{#readlines}, taking parameters for both
   #
   # @param fname [String] Input and overwriting filename
@@ -841,6 +905,39 @@ class FileOverwrite
   # @see #readlines
   def self.readlines!(*rest, **kwd, &bloc)
     readlines(*rest, **kwd, &bloc).run!(**kwd)
+  end
+
+
+  # Class method for {FileOverwrite#initialize}.{#read}
+  #
+  # @see #initialize
+  # @see #read
+  def self.read(*rest, **kwd, &bloc)
+    new(*rest, **kwd).send(__method__, **kwd, &bloc)
+  end
+
+  # Class method for {FileOverwrite#initialize}.{#read!}
+  #
+  # @see #initialize
+  # @see #read!
+  def self.read!(*rest, **kwd, &bloc)
+    new(*rest, **kwd).send(__method__, **kwd, &bloc)
+  end
+
+  # Class method for {FileOverwrite#initialize}.{#each_line}
+  #
+  # @see #initialize
+  # @see #each_line
+  def self.each_line(fname, *rest, **kwd, &bloc)
+    new(fname, **kwd).send(__method__, *rest, **kwd, &bloc)
+  end
+
+  # Class method for {FileOverwrite#initialize}.{#each_line!}
+  #
+  # @see #initialize
+  # @see #each_line!
+  def self.each_line!(fname, *rest, **kwd, &bloc)
+    new(fname, **kwd).send(__method__, *rest, **kwd, &bloc)
   end
 
 
@@ -1018,13 +1115,14 @@ class FileOverwrite
     return if 1 == rest.size
 
     method = caller_locations()[0].label
-    if (max != 1 && 'sub' == method) ||  (max != 0 && 'gsub' == method)
-      msg = sprintf "WARNING: max option (%s) is given and not 1, but ignored in %s().  Give a block to take it into account..", max, method
+    if !@verbose.nil? && ((max != 1 && 'sub' == method) ||  (max != 0 && 'gsub' == method))
+      msg = sprintf "WARNING: max option (%s) of neither 0 nor 1 is given. It is ignored in %s(). Give a block (instead of just arguments) for the max option to be taken into account.", max, method
       warn msg
     end
 
     # Note: When 2 arguments are given, the block is simply ignored in default (in Ruby 2.5).
     @outstr.send(method+'!', *rest) # sub! or gsub! => String|nil
+    @last_match = Regexp.last_match # $~
     @outstr
   end
   private :sub_gsub_args_only

@@ -5,7 +5,7 @@
 
 # require 'tempfile'
 # require 'fileutils'
-require 'file_overwrite/file_overwrite'
+require 'file_overwrite'
 
 $stdout.sync=true
 $stderr.sync=true
@@ -13,6 +13,11 @@ $stderr.sync=true
 
 #################################################
 # Unit Test
+#
+# Note: $VERBOSE is set true in default in Testing.
+#   Then, the VERBOSE option in FileOverwite.new is
+#   also set TRUE in the tests in default, being different
+#   from the Ruby default environment ($VERBOSE==false).
 #################################################
 
 #if $0 == __FILE__
@@ -33,7 +38,7 @@ $stderr.sync=true
 
       @orig_path  = @tmpioin.path
       @orig_content = "1 line A\n2 line B\n3 line C\n"
-      @orig_mtime = Time.now - 86400  # A day earlier
+      @orig_mtime = Time.now.round - 86400  # A day earlier
 
       @tmpioin.print @orig_content
       reset_mtime
@@ -77,6 +82,7 @@ $stderr.sync=true
       assert_equal @tmpioin.path, m[1]
     end
 
+    # Testing backup file names
     def test_backup
       file1 = create_template_file
       fpath = file1.path
@@ -91,11 +97,15 @@ $stderr.sync=true
       assert_equal fpath+suffix1, f1.backup  # Reverted back
     end
 
-    def test_open  # modify
+    # FileOverwrite#modify (or #open as an alias)
+    def test_open
       file1 = create_template_file
       fpath = file1.path
       f1 = FO.new(fpath)
       s = 'tekito'
+
+      # Testing non-block
+      assert_raises(ArgumentError){ f1.modify }
 
       # Testing open 
       f1.open{|ior, iow|
@@ -143,10 +153,33 @@ $stderr.sync=true
       assert_nil f1.temporary_filename
     end
 
+
+    # FileOverwrite.#open! (an alias of #modify!)
+    def test_open_classmethod
+      file1 = create_template_file
+      fpath = file1.path
+      s = 'tekito'
+
+      # Testing FileOverwrite.open!
+      f1 = nil
+      assert_output('', /File.+updated/){
+        f1 = FO.open!(fpath){|ior, iow|
+          line = ior.gets
+          ior.gets  line
+          iow.print s+s
+        }
+      }
+      assert_equal fpath, f1.path
+      assert_equal s+s, f1.dump  # Testing dump after completed.
+      assert_equal s+s, File.read(f1.path)
+    end
+
+
+    # Tests of read, read!, replace_with
     def test_read
       file1 = create_template_file
       fpath = file1.path
-      f1 = FO.new(fpath)
+      f1 = FO.new(fpath, verbose: true)
 
       s = 'tekito'
       f1.read{|i| s}
@@ -167,6 +200,20 @@ $stderr.sync=true
       assert_output('', / not opened,/){ f1.run!(verbose: true) }
       assert_equal @orig_content, File.read(fpath)
       assert_in_delta(@orig_mtime, File.mtime(fpath), 1)  # 1 sec allowance
+      
+      # Test of invalid returns from the block
+      f1.reset
+      assert_raises(FileOverwriteError){ f1.read{} }
+      f1.reset
+      assert_raises(FileOverwriteError){ f1.read{nil} }
+      f1.reset
+      assert_raises(FileOverwriteError){ f1.read{5} }
+      f1.reset
+      assert_output('', /Empty string[^\n]*\n.*File .+updated.+Size.* => 0 bytes/im){ f1.read!(){''} }
+      # Warning is issued if an empty string is returned, but it is saved nonetheless.
+      assert_equal 0, f1.sizes[:new]  # The new size is zero.
+
+      assert_raises(FrozenError){ f1.reset }  # Prohibited to reset, once saved.
     end
 
     def test_open_run_noop  # modify
@@ -289,13 +336,30 @@ $stderr.sync=true
       assert_equal @orig_content+s, File.read(fpath)
       assert_nil f1.sizes
     end
-      
+
+    # FileOverwrite.#read!
+    def test_read_classmethod
+      file1 = create_template_file
+      fpath = file1.path
+      s = 'tekito'
+
+      # Testing FileOverwrite.read!
+      f1 = nil
+      assert_output('', /File.+updated/){
+        f1 = FO.read!(fpath){|i| s+s}
+      }
+      assert_equal fpath, f1.path
+      assert_equal s+s, f1.dump  # Testing dump after completed.
+      assert_equal s+s, File.read(f1.path)
+    end
+
     def test_sub
       file1 = create_template_file
       fpath = file1.path
       f1 = FO.new(fpath, suffix: nil, verbose: true)
 
       f1.sub(/line/, 'xyz')
+      assert_equal 'line', f1.last_match[0]
       assert_match(/xyz/, f1.dump.split(/\n/)[0])
       refute_match(/xyz/, f1.dump.split(/\n/)[1])
       f1.reset
@@ -308,6 +372,9 @@ $stderr.sync=true
       refute_match(/xyz/, f1.dump.split(/\n/)[0])
       
       f1.sub(/(li)(n)/, '\1' + 'k')
+      assert_equal 'lin',  f1.last_match[0]
+      assert_equal 'li',   f1.last_match[1]
+      assert_equal 'n',    f1.last_match[2]
       assert_match(/like/, f1.dump.split(/\n/)[0])
       refute_match(/like/, f1.dump.split(/\n/)[1])
       f1.reset
@@ -315,16 +382,17 @@ $stderr.sync=true
 
       # Failed-match case
       f1.sub(/naiyo(li)(n)/, '\1' + 'k')
+      assert_nil  f1.last_match
       assert_match(/line/, f1.dump.split(/\n/)[0])
       assert_equal @orig_content, f1.instance_eval{@outstr}
       f1.reset
 
-      ### The following does NOT work!
-      # f1.sub(/(li)(ne)/){printf "and=(%s)(%s)", $&, $1; 'LIne'} # $1.upcase + $2
-
-      ### MatchData extension in this method!
-      f1.sub(/(li)(n)/){|_,m| m[1].upcase+m[2]} # $1.upcase + $2
-
+      # With a block
+      f1.sub(/(li)(n)/){$1.upcase+$2}
+      # f1.sub(/(li)(n)/){|_,m| m[1].upcase+m[2]} # $1.upcase + $2  # Old version
+      assert_equal 'lin',  f1.last_match[0]
+      assert_equal 'li',   f1.last_match[1]
+      assert_equal 'n',    f1.last_match[2]
       assert_match(/LIne/, f1.dump.split(/\n/)[0], "DEBUG: "+f1.dump)
       refute_match(/LIne/, f1.dump.split(/\n/)[1])
       f1.sub(/I/){nil}   # nil.to_s (as in String#sub)
@@ -335,8 +403,19 @@ $stderr.sync=true
       refute_match(/LI?ne/, f1.dump.split(/\n/)[0])
       assert_nil  f1.instance_eval{@outstr}
 
+      # With a block with an argument
+      f1.sub(/(li)(n)/){|ms| ms.upcase} # ms == $&
+      assert_equal 'lin',  f1.last_match[0]
+      assert_equal 'li',   f1.last_match[1]
+      assert_equal 'n',    f1.last_match[2]
+      assert_match(/LINe/, f1.dump.split(/\n/)[0], "DEBUG: "+f1.dump)
+      f1.reset
+      refute_match(/LI?ne/, f1.dump.split(/\n/)[0])
+      assert_nil  f1.instance_eval{@outstr}
+
       # Failed-match case
       f1.sub(/naiyo(li)(n)/){|_,m| m[1].upcase+m[2]} # $1.upcase + $2
+      assert_nil  f1.last_match
       assert_match(/line/, f1.dump.split(/\n/)[0], "DEBUG: "+f1.dump)
       f1.reset
     end
@@ -347,7 +426,10 @@ $stderr.sync=true
       fpath = file1.path
       f1 = FO.new(fpath, suffix: nil, verbose: true)
 
+      f1.gsub(/naiyo/, 'xyz')  # Failed match
+      assert_nil  f1.last_match
       assert_output('', ''){ f1.gsub(/line/, 'xyz') }
+      assert_equal 'line', f1.last_match[0]
       assert_match(/xyz/, f1.dump.split(/\n/)[0])
       assert_match(/xyz/, f1.dump.split(/\n/)[1])
       assert_match(/xyz/, f1.dump.split(/\n/)[2])
@@ -355,6 +437,7 @@ $stderr.sync=true
       refute_match(/xyz/, f1.dump.split(/\n/)[0])
 
       assert_output('', ''){ f1.gsub(/line/, 'xyz', max: 1) }
+      assert_equal 'line', f1.last_match[0]
       assert_match(/xyz/, f1.dump.split(/\n/)[0])
       refute_match(/xyz/, f1.dump.split(/\n/)[1])
       f1.reset
@@ -364,6 +447,7 @@ $stderr.sync=true
       assert_output('', /WARNING\b.+\bmax/i){ f1.gsub(/line/, 'xyz', max: 2) }
       f1.reset
 
+      # With a block
       assert_output(nil){ f1.gsub(/line/){ 'xyz' } }
       assert_match(/xyz/, f1.dump.split(/\n/)[0])
       assert_match(/xyz/, f1.dump.split(/\n/)[1])
@@ -371,12 +455,44 @@ $stderr.sync=true
       f1.reset
       refute_match(/xyz/, f1.dump.split(/\n/)[0])
 
+      # With a block with an argument and $1 etc
+      mat=nil
+      f1.gsub(/lin(e)/){ |ms| ms+$1.upcase } # lineE
+      mat=$~
+      assert_equal mat, f1.last_match
+      assert_match(/lineE/, f1.dump.split(/\n/)[0])
+      assert_match(/lineE/, f1.dump.split(/\n/)[1])
+      assert_match(/lineE/, f1.dump.split(/\n/)[2])
+      assert_equal 'e', mat[1]
+      assert_equal 2, mat.pre_match.scan(/\bline\b/).size  # "1 line A\n2 line B\n3 "
+      assert_match(/[^\n]+\n$/m, mat.post_match)           # " C\n"
+      f1.reset
+      refute_match(/lineE/, f1.dump.split(/\n/)[0])
+
+      # With a block with max option
       assert_output('', ''){ f1.gsub(/line/, max: 2){ 'xyz' } }
+      assert_equal 'line', f1.last_match[0]
       assert_match(/xyz/, f1.dump.split(/\n/)[0])
       assert_match(/xyz/, f1.dump.split(/\n/)[1])
       refute_match(/xyz/, f1.dump.split(/\n/)[2])
       f1.reset
       refute_match(/xyz/, f1.dump.split(/\n/)[0])
+
+      # With a block with an argument and $1 etc
+      # assert_output(nil){ f1.gsub(/lin(e)/){ |ms| ms+$1.upcase } } # lineE
+      mat=nil
+      f1.gsub(/lin(e)/, max: 2){ |ms| ms+$1.upcase } # lineE
+      mat=$~
+      assert_equal mat, f1.last_match
+      assert_match(/lineE/, f1.dump.split(/\n/)[0])
+      assert_match(/lineE/, f1.dump.split(/\n/)[1])
+      refute_match(/lineE/, f1.dump.split(/\n/)[2])
+      assert_equal 'e', mat[1]
+      assert_equal 1, mat.pre_match.scan(/\bline\b/).size  # "1 line A\n2 "
+      assert_equal " B\n3 line C\n",     mat.post_match
+      assert_match(/[^\n]+\n[^\n]+\n$/m, mat.post_match)   # " B\n3 line C\n"
+      f1.reset
+      refute_match(/lineE/, f1.dump.split(/\n/)[0])
     end
 
 
@@ -437,6 +553,25 @@ $stderr.sync=true
     end
 
 
+    # FileOverwrite.#each_line
+    def test_each_line_classmethod
+      file1 = create_template_file
+      fpath = file1.path
+      s = 'tekito'
+      nlines = File.read(fpath).count("\n")  # == 3
+
+      # Testing FileOverwrite.each_line
+      f1 = nil
+      f1 = FO.each_line(fpath){|i| s}
+      assert_equal fpath, f1.path
+      assert_equal s*nlines, f1.dump  # Testing dump after completed.
+      refute_equal s*nlines, File.read(f1.path)
+      assert_output('', /File.+updated/){
+        f1.save
+      }
+      assert_equal s*nlines, File.read(f1.path)
+    end
+
     def test_readlines
       file1 = create_template_file
       fpath = file1.path
@@ -460,6 +595,24 @@ $stderr.sync=true
       sizes = f1.sizes
       assert_equal @orig_content.size, sizes[:old]
       assert_equal s.size,             sizes[:new]
+    end
+
+    def test_touch
+      file1 = create_template_file
+      fpath = file1.path
+      f1 = FO.new(fpath, suffix: nil, verbose: true, touch: true)
+
+      assert_equal fpath, f1.path
+      assert_equal @orig_mtime.to_s, File.mtime(f1.path).to_s
+      f1.path.replace('naiyo')
+      assert_equal fpath, f1.path
+      Time.stub :now, Time.now do
+        assert_output('', /^(\s*warning:?\s*)?No change\b.+timestamp is updated/i){ f1.read!{|i| i} }
+        assert_equal fpath, f1.path
+
+        refute_equal @orig_mtime.to_s, File.mtime(f1.path).to_s # b/c touched
+        assert_equal Time.now.to_s,    File.mtime(f1.path).to_s # nb., Time#round would add a second.
+      end
     end
 
   end	# class TestUnitFileOverwrite < MiniTest::Test
